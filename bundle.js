@@ -735,6 +735,16 @@ const DEFAULT_GROQ_KEY = decodeSecret('Z3NrXzVSWkdOTm01REdtM2p5WExYVXhUV0dkeWIzR
 const DEFAULT_GEMINI_KEY = decodeSecret('QVEuQWI4Uk42SWktUnNiMjFWeFBxN0ZfSkVGT0VtMGg4UWJOcmFpS3NrQ3J6VW1GMUh6Q0E=');
 const DEFAULT_PIN = '1234';
 
+const DEFAULT_FIREBASE_CONFIG = JSON.stringify({
+  apiKey: decodeSecret('QUl6YVN5Q0YxUnQ3cF9EamNQeFpSRmFaRlF4T0xXbzNZV3FhRFFz'),
+  authDomain: "aplikasikasir-648ba.firebaseapp.com",
+  projectId: "aplikasikasir-648ba",
+  storageBucket: "aplikasikasir-648ba.firebasestorage.app",
+  messagingSenderId: "553464157514",
+  appId: "1:553464157514:web:7a373f712ac064144d1db3",
+  measurementId: "G-4YGW5LWPW0"
+}, null, 2);
+
 const KEYS = {
   BAHAN_BAKU: 'kasir_pos_bahan_baku',
   MENU: 'kasir_pos_menu',
@@ -769,8 +779,8 @@ class StorageManager {
         groqApiKey: DEFAULT_GROQ_KEY,
         geminiApiKey: DEFAULT_GEMINI_KEY,
         managerPin: DEFAULT_PIN,
-        firebaseConfig: '',
-        firebaseEnabled: false,
+        firebaseConfig: DEFAULT_FIREBASE_CONFIG,
+        firebaseEnabled: true,
         storeName: 'Kopi & Kuliner Nusantara',
         receiptFooter: 'Terima kasih atas pesanan Anda!\nSemoga harimu menyenangkan 😊'
       }));
@@ -783,6 +793,7 @@ class StorageManager {
         if (!s.groqApiKey) { s.groqApiKey = DEFAULT_GROQ_KEY; changed = true; }
         if (!s.geminiApiKey) { s.geminiApiKey = DEFAULT_GEMINI_KEY; changed = true; }
         if (!s.managerPin) { s.managerPin = DEFAULT_PIN; changed = true; }
+        if (!s.firebaseConfig) { s.firebaseConfig = DEFAULT_FIREBASE_CONFIG; s.firebaseEnabled = true; changed = true; }
         if (changed) localStorage.setItem(KEYS.SETTINGS, JSON.stringify(s));
       } catch (e) {}
     }
@@ -1350,16 +1361,130 @@ class StorageManager {
     window.location.reload();
   }
 
-  // Optional Firebase sync handler
+  // --- REAL FIREBASE FIRESTORE CLOUD INTEGRATION ---
+  async loadFirebaseScripts() {
+    if (window.firebase && window.firebase.firestore) return;
+    
+    return new Promise((resolve, reject) => {
+      if (document.getElementById('firebase-sdk-app')) {
+        return resolve();
+      }
+      const scriptApp = document.createElement('script');
+      scriptApp.id = 'firebase-sdk-app';
+      scriptApp.src = 'https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js';
+      scriptApp.onload = () => {
+        const scriptFirestore = document.createElement('script');
+        scriptFirestore.id = 'firebase-sdk-firestore';
+        scriptFirestore.src = 'https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js';
+        scriptFirestore.onload = () => resolve();
+        scriptFirestore.onerror = () => reject(new Error('Gagal memuat Firebase Firestore SDK'));
+        document.head.appendChild(scriptFirestore);
+      };
+      scriptApp.onerror = () => reject(new Error('Gagal memuat Firebase App SDK'));
+      document.head.appendChild(scriptApp);
+    });
+  }
+
+  async initFirebase() {
+    const settings = this.getSettings();
+    if (!settings.firebaseEnabled || !settings.firebaseConfig) return null;
+
+    try {
+      let config = settings.firebaseConfig;
+      if (typeof config === 'string') {
+        const cleanJson = config
+          .replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":')
+          .replace(/'/g, '"');
+        config = JSON.parse(cleanJson);
+      }
+
+      await this.loadFirebaseScripts();
+
+      if (!window.firebase.apps.length) {
+        this.firebaseApp = window.firebase.initializeApp(config);
+      } else {
+        this.firebaseApp = window.firebase.app();
+      }
+
+      this.firestoreDb = window.firebase.firestore();
+      return this.firestoreDb;
+    } catch (err) {
+      console.warn('Firebase init error:', err);
+      throw err;
+    }
+  }
+
+  async testFirebaseConnection() {
+    const db = await this.initFirebase();
+    if (!db) throw new Error('Firebase belum diaktifkan atau konfigurasi JSON masih kosong.');
+    
+    const settings = this.getSettings();
+    const outletId = (settings.storeName || 'kasir_outlet').toLowerCase().replace(/[^a-z0-9]/g, '_');
+    const testDoc = db.collection('kasir_outlets').doc(outletId).collection('data').doc('_ping');
+    await testDoc.set({ ping: true, time: new Date().toISOString() });
+    const snap = await testDoc.get();
+    return snap.exists;
+  }
+
   async syncToFirebase(collectionName, data) {
     const settings = this.getSettings();
     if (!settings.firebaseEnabled || !settings.firebaseConfig) return;
 
     try {
-      // Background Firestore sync if configured
+      if (!this.firestoreDb) {
+        await this.initFirebase();
+      }
+      if (this.firestoreDb) {
+        const outletId = (settings.storeName || 'kasir_outlet').toLowerCase().replace(/[^a-z0-9]/g, '_');
+        const docRef = this.firestoreDb.collection('kasir_outlets').doc(outletId).collection('data').doc(collectionName);
+        await docRef.set({
+          payload: data,
+          lastSync: new Date().toISOString()
+        }, { merge: true });
+        console.log(`🔥 [Firebase Cloud] Sinkronisasi ${collectionName} berhasil!`);
+      }
     } catch (err) {
       console.warn('Firebase sync notice:', err);
     }
+  }
+
+  async pushAllToFirebase() {
+    await this.syncToFirebase('bahan_baku', this.getBahanBaku());
+    await this.syncToFirebase('menu', this.getMenu());
+    await this.syncToFirebase('transaksi', this.getTransaksi());
+    this.logAudit('FIREBASE_PUSH_ALL', 'Mengunggah seluruh data lokal ke cloud Firestore');
+  }
+
+  async pullAllFromFirebase() {
+    const db = await this.initFirebase();
+    if (!db) throw new Error('Firebase belum aktif atau konfigurasi kosong.');
+    const settings = this.getSettings();
+    const outletId = (settings.storeName || 'kasir_outlet').toLowerCase().replace(/[^a-z0-9]/g, '_');
+
+    const colRef = db.collection('kasir_outlets').doc(outletId).collection('data');
+    
+    const [bahanSnap, menuSnap, trxSnap] = await Promise.all([
+      colRef.doc('bahan_baku').get(),
+      colRef.doc('menu').get(),
+      colRef.doc('transaksi').get()
+    ]);
+
+    let count = 0;
+    if (bahanSnap.exists && Array.isArray(bahanSnap.data().payload)) {
+      this.saveBahanBaku(bahanSnap.data().payload);
+      count++;
+    }
+    if (menuSnap.exists && Array.isArray(menuSnap.data().payload)) {
+      this.saveMenu(menuSnap.data().payload);
+      count++;
+    }
+    if (trxSnap.exists && Array.isArray(trxSnap.data().payload)) {
+      this.saveTransaksi(trxSnap.data().payload);
+      count++;
+    }
+
+    this.logAudit('FIREBASE_PULL_ALL', 'Menarik seluruh data cloud Firestore ke perangkat ini');
+    return { success: true, pulledCount: count };
   }
 }
 
@@ -5036,7 +5161,7 @@ class SettingsModule {
               </div>
               <div>
                 <h3 class="text-base font-bold text-gray-900">Sinkronisasi Cloud Firebase Firestore (Opsional)</h3>
-                <p class="text-xs text-gray-500">Jika dikosongkan, sistem 100% berjalan murni offline di browser lokal (Zero-Dependency)</p>
+                <p class="text-xs text-gray-500">Cadangan cloud otomatis gratis Google Firebase untuk sinkronisasi antar perangkat kasir</p>
               </div>
             </div>
             <label class="flex items-center gap-2 cursor-pointer select-none">
@@ -5054,12 +5179,32 @@ class SettingsModule {
                 placeholder='{ "apiKey": "...", "authDomain": "...", "projectId": "...", "storageBucket": "..." }'
               >${settings.firebaseConfig || ''}</textarea>
             </div>
-            <p class="text-xs text-gray-500">
-              Tempel objek konfigurasi Firebase proyek Firestore Anda sendiri jika ingin melakukan pencadangan otomatis ke cloud.
-            </p>
-            <button class="ios-btn ios-btn-primary ios-btn-sm" id="btn-save-firebase">
-              Simpan Konfigurasi Firebase
-            </button>
+            <div class="p-3 bg-amber-50/70 rounded-xl border border-amber-200/80 text-xs text-amber-900 space-y-1.5">
+              <strong class="flex items-center gap-1.5">
+                <span>📌</span>
+                <span>Cara Mengambil Konfigurasi Resmi Firebase (Gratis Selamanya):</span>
+              </strong>
+              <ol class="list-decimal list-inside space-y-1 text-gray-600 text-[11px] leading-relaxed">
+                <li>Buka <a href="https://console.firebase.google.com" target="_blank" rel="noopener" class="text-blue-600 underline font-semibold">console.firebase.google.com</a> dan klik <strong>Tambahkan Project</strong>.</li>
+                <li>Di menu kiri, pilih <strong>Build ➔ Firestore Database</strong>, lalu klik <strong>Create Database</strong> (pilih lokasi terdekat Jakarta/asia-southeast2 & pilih <em>Start in Test Mode</em>).</li>
+                <li>Buka <strong>Project Settings</strong> (ikon roda gigi di kiri atas), lalu di bagian bawah klik ikon Web <strong>(&lt;/&gt;)</strong>.</li>
+                <li>Salin seluruh kode di dalam <code>const firebaseConfig = { ... };</code> dan tempelkan di kotak teks di atas.</li>
+              </ol>
+            </div>
+            <div class="flex flex-wrap items-center gap-2 pt-1">
+              <button class="ios-btn ios-btn-primary ios-btn-sm" id="btn-save-firebase">
+                Simpan Konfigurasi
+              </button>
+              <button class="ios-btn ios-btn-secondary ios-btn-sm" id="btn-test-firebase">
+                Test Koneksi Firestore
+              </button>
+              <button class="ios-btn ios-btn-secondary ios-btn-sm" id="btn-push-firebase">
+                Unggah Data ke Cloud Sekarang
+              </button>
+              <button class="ios-btn ios-btn-secondary ios-btn-sm" id="btn-pull-firebase">
+                Tarik Data dari Cloud
+              </button>
+            </div>
           </div>
         </div>
 
@@ -5399,6 +5544,80 @@ class SettingsModule {
         const settings = storage.getSettings();
         storage.saveSettings({ ...settings, firebaseConfig, firebaseEnabled });
         modal.showToast('Konfigurasi Firebase diperbarui!', 'success');
+      });
+    }
+
+    // Test Firebase Connection
+    const testFirebaseBtn = el.querySelector('#btn-test-firebase');
+    if (testFirebaseBtn) {
+      testFirebaseBtn.addEventListener('click', async () => {
+        testFirebaseBtn.disabled = true;
+        testFirebaseBtn.textContent = 'Menguji Firestore...';
+        try {
+          await storage.testFirebaseConnection();
+          modal.showAlert({
+            title: 'Koneksi Firestore Berhasil! 🔥',
+            message: 'Aplikasi kasir berhasil terhubung dan melakukan uji tulis-baca pada database Cloud Firestore Anda. Sinkronisasi data cloud aktif.',
+            confirmText: 'Selesai'
+          });
+        } catch (err) {
+          modal.showAlert({
+            title: 'Koneksi Firestore Gagal',
+            message: `Gagal menghubungkan ke Firebase: ${err.message}\n\nPastikan:\n1. Konfigurasi JSON benar.\n2. Database Firestore sudah dibuat di mode 'Test Mode' agar dapat membaca & menulis data.`,
+            confirmText: 'Tutup'
+          });
+        } finally {
+          testFirebaseBtn.disabled = false;
+          testFirebaseBtn.textContent = 'Test Koneksi Firestore';
+        }
+      });
+    }
+
+    // Push local data to Firebase cloud
+    const pushFirebaseBtn = el.querySelector('#btn-push-firebase');
+    if (pushFirebaseBtn) {
+      pushFirebaseBtn.addEventListener('click', async () => {
+        pushFirebaseBtn.disabled = true;
+        pushFirebaseBtn.textContent = 'Mengunggah...';
+        try {
+          await storage.pushAllToFirebase();
+          modal.showToast('Seluruh data Bahan, Menu, dan Transaksi berhasil diunggah ke Firebase!', 'success');
+        } catch (err) {
+          modal.showAlert({
+            title: 'Gagal Mengunggah',
+            message: err.message,
+            confirmText: 'Tutup'
+          });
+        } finally {
+          pushFirebaseBtn.disabled = false;
+          pushFirebaseBtn.textContent = 'Unggah Data ke Cloud Sekarang';
+        }
+      });
+    }
+
+    // Pull cloud data to local device
+    const pullFirebaseBtn = el.querySelector('#btn-pull-firebase');
+    if (pullFirebaseBtn) {
+      pullFirebaseBtn.addEventListener('click', () => {
+        modal.showAlert({
+          title: 'Tarik Data dari Cloud?',
+          message: 'Data lokal di browser ini akan diperbarui dengan data terbaru yang tersimpan di Cloud Firestore Anda. Lanjutkan?',
+          confirmText: 'Ya, Tarik Data',
+          cancelText: 'Batal',
+          onConfirm: async () => {
+            try {
+              const res = await storage.pullAllFromFirebase();
+              modal.showToast(`Berhasil menarik ${res.pulledCount} koleksi data dari Firebase!`, 'success');
+              setTimeout(() => window.location.reload(), 600);
+            } catch (err) {
+              modal.showAlert({
+                title: 'Gagal Menarik Data',
+                message: err.message,
+                confirmText: 'Tutup'
+              });
+            }
+          }
+        });
       });
     }
 
