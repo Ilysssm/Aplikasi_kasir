@@ -5,7 +5,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "serve": "python3 -m http.server 3000"
+    "serve": "python3 -m http.server 3000",
+    "build": "node build.js",
+    "test": "node tests/test_suite.js"
   },
   "keywords": ["pos", "point-of-sale", "culinary", "hpp-calculator", "groq-ai"],
   "author": "Muhammad Ilyasa",
