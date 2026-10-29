@@ -1,0 +1,13 @@
+{
+  "name": "kasir-pos-kuliner",
+  "version": "1.0.0",
+  "description": "Web POS & Culinary Operational Management SPA - Modern Single-Page Application",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "serve": "python3 -m http.server 3000"
+  },
+  "keywords": ["pos", "point-of-sale", "culinary", "hpp-calculator", "groq-ai"],
+  "author": "Muhammad Ilyasa",
+  "license": "MIT"
+}
